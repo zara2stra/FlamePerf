@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block title %}Upload - Perf Flame Analyzer{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Upload Perf Bundle</h1>
+</div>
+
+<div class="upload-card">
+    <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data" id="upload-form">
+        <div class="form-group">
+            <label for="bundle">Perf Bundle (.tar.gz) or raw perf script file</label>
+            <div class="drop-zone" id="drop-zone">
+                <input type="file" name="bundle" id="bundle" accept=".tar.gz,.tgz,.txt,.gz" required>
+                <div class="drop-zone-text">
+                    <p class="drop-icon">&#8679;</p>
+                    <p>Drag &amp; drop your file here or click to browse</p>
+                    <p class="drop-hint">Accepts .tar.gz bundles from perf-collect.sh or raw perf script text files</p>
+                </div>
+                <div class="drop-zone-file" id="file-info" style="display:none;"></div>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="cluster_id">Cluster ID (optional, overrides bundle metadata)</label>
+            <input type="text" name="cluster_id" id="cluster_id"
+                   placeholder="e.g. prod-cluster-01">
+        </div>
+
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary btn-lg" id="submit-btn">
+                Upload &amp; Analyze
+            </button>
+        </div>
+
+        <div class="upload-progress" id="progress-wrap" style="display:none;">
+            <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+            <p id="progress-text">Uploading...</p>
+        </div>
+    </form>
+</div>
+
+<div class="info-card">
+    <h3>How to collect data on a CVM</h3>
+    <pre><code># Copy perf-collect.sh to the CVM, then run:
+chmod +x perf-collect.sh
+./perf-collect.sh --cluster-id my-cluster-01
+
+# Optional parameters:
+./perf-collect.sh --cluster-id my-cluster-01 \
+    --duration 30 \
+    --frequency 99 \
+    --pid 12345</code></pre>
+    <p>Transfer the resulting <code>.tar.gz</code> bundle to this analyzer.</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('bundle');
+    const fileInfo = document.getElementById('file-info');
+    const form = document.getElementById('upload-form');
+    const progressWrap = document.getElementById('progress-wrap');
+    const progressFill = document.getElementById('progress-fill');
+    const progressText = document.getElementById('progress-text');
+    const submitBtn = document.getElementById('submit-btn');
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / 1048576).toFixed(1) + ' MB';
+    }
+
+    function showFile(file) {
+        fileInfo.textContent = file.name + ' (' + formatSize(file.size) + ')';
+        fileInfo.style.display = 'block';
+    }
+
+    fileInput.addEventListener('change', function() {
+        if (this.files.length > 0) showFile(this.files[0]);
+    });
+
+    ['dragover', 'dragenter'].forEach(function(evt) {
+        dropZone.addEventListener(evt, function(e) {
+            e.preventDefault();
+            dropZone.classList.add('drag-over');
+        });
+    });
+
+    ['dragleave', 'drop'].forEach(function(evt) {
+        dropZone.addEventListener(evt, function(e) {
+            e.preventDefault();
+            dropZone.classList.remove('drag-over');
+        });
+    });
+
+    dropZone.addEventListener('drop', function(e) {
+        if (e.dataTransfer.files.length > 0) {
+            fileInput.files = e.dataTransfer.files;
+            showFile(e.dataTransfer.files[0]);
+        }
+    });
+
+    form.addEventListener('submit', function() {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Processing...';
+        progressWrap.style.display = 'block';
+        progressFill.style.width = '100%';
+        progressText.textContent = 'Uploading and analyzing... this may take a moment for large files.';
+    });
+})();
+</script>
+{% endblock %}

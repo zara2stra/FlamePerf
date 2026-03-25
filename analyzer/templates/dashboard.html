@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Perf Flame Analyzer{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Dashboard</h1>
+    <a href="{{ url_for('upload') }}" class="btn btn-primary">Upload Bundle</a>
+</div>
+
+<div class="filter-bar">
+    <form method="get" action="{{ url_for('dashboard') }}" class="filter-form">
+        <label for="cluster_id">Filter by Cluster ID:</label>
+        <select name="cluster_id" id="cluster_id" onchange="this.form.submit()">
+            <option value="">All clusters</option>
+            {% for cid in cluster_ids %}
+            <option value="{{ cid }}" {% if cid == selected_cluster %}selected{% endif %}>{{ cid }}</option>
+            {% endfor %}
+        </select>
+        {% if selected_cluster %}
+        <a href="{{ url_for('dashboard') }}" class="btn btn-sm">Clear filter</a>
+        {% endif %}
+    </form>
+</div>
+
+{% if uploads %}
+<div class="table-wrap">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Cluster ID</th>
+                <th>Hostname</th>
+                <th>Collected</th>
+                <th>Uploaded</th>
+                <th>Kernel</th>
+                <th>Samples</th>
+                <th>Duration</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in uploads %}
+            <tr>
+                <td>{{ u.id }}</td>
+                <td><span class="cluster-tag">{{ u.cluster_id }}</span></td>
+                <td>{{ u.hostname or '-' }}</td>
+                <td>{{ u.collection_timestamp or '-' }}</td>
+                <td>{{ u.upload_timestamp }}</td>
+                <td><code>{{ u.kernel_version or '-' }}</code></td>
+                <td>{{ u.total_samples or 0 }}</td>
+                <td>{{ u.duration_seconds or '-' }}s @ {{ u.frequency_hz or '-' }}Hz</td>
+                <td>
+                    <a href="{{ url_for('analysis', upload_id=u.id) }}" class="btn btn-sm">Analyze</a>
+                    <form method="post" action="{{ url_for('delete', upload_id=u.id) }}"
+                          class="inline-form"
+                          onsubmit="return confirm('Delete this upload?');">
+                        <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="empty-state">
+    <p>No uploads yet{% if selected_cluster %} for cluster <strong>{{ selected_cluster }}</strong>{% endif %}.</p>
+    <a href="{{ url_for('upload') }}" class="btn btn-primary">Upload your first bundle</a>
+</div>
+{% endif %}
+{% endblock %}

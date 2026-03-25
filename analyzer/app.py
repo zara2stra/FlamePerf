@@ -1,0 +1,361 @@
+"""
+Flask application for the Perf Flame Analyzer.
+
+Routes:
+  /                  - Dashboard (list uploads, filter by cluster)
+  /upload            - Upload a perf bundle
+  /analysis/<id>     - View analysis results + flamegraph
+  /api/flamegraph/<id>  - JSON for d3-flame-graph
+  /api/analysis/<id>    - Diagnosis JSON
+  /delete/<id>       - Delete an upload
+"""
+
+import os
+import json
+import logging
+import tarfile
+import tempfile
+import traceback
+
+from flask import (
+    Flask, render_template, request, redirect, url_for,
+    flash, jsonify, abort,
+)
+
+from models import init_db, insert_upload, get_all_uploads, get_cluster_ids, \
+    get_uploads_by_cluster, get_upload, delete_upload
+from parser import parse_and_process, folded_to_flamegraph_json, parse_top_snapshot, _is_idle_sample
+from diagnostics import run_diagnostics, _classify_thread
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+log = logging.getLogger(__name__)
+
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'perf-analyzer-secret-change-me')
+
+DATA_DIR = os.environ.get('DATA_DIR', '/app/data')
+UPLOAD_DIR = os.path.join(DATA_DIR, 'uploads')
+MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500 MB
+
+app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
+
+
+@app.before_request
+def ensure_dirs():
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+@app.route('/')
+def dashboard():
+    cluster_filter = request.args.get('cluster_id', '').strip()
+    cluster_ids = get_cluster_ids()
+
+    if cluster_filter:
+        uploads = get_uploads_by_cluster(cluster_filter)
+    else:
+        uploads = get_all_uploads()
+
+    return render_template('dashboard.html',
+                           uploads=uploads,
+                           cluster_ids=cluster_ids,
+                           selected_cluster=cluster_filter)
+
+
+@app.route('/upload', methods=['GET', 'POST'])
+def upload():
+    if request.method == 'GET':
+        return render_template('upload.html')
+
+    file = request.files.get('bundle')
+    if not file or file.filename == '':
+        flash('No file selected.', 'error')
+        return redirect(url_for('upload'))
+
+    manual_cluster_id = request.form.get('cluster_id', '').strip()
+
+    try:
+        result = _process_bundle(file, manual_cluster_id)
+        flash(f'Upload processed: {result["total_samples"]} samples from {result["hostname"]}.', 'success')
+        return redirect(url_for('analysis', upload_id=result['upload_id']))
+    except Exception as e:
+        traceback.print_exc()
+        flash(f'Error processing bundle: {e}', 'error')
+        return redirect(url_for('upload'))
+
+
+@app.route('/analysis/<int:upload_id>')
+def analysis(upload_id):
+    record = get_upload(upload_id)
+    if record is None:
+        abort(404)
+    return render_template('analysis.html', record=record)
+
+
+@app.route('/api/flamegraph/<int:upload_id>')
+def api_flamegraph(upload_id):
+    record = get_upload(upload_id)
+    if record is None:
+        abort(404)
+
+    process_filter = request.args.get('process', '').strip()
+    mode = request.args.get('mode', 'thread')
+    active_only = request.args.get('active_only', '').strip()
+    folded = record.get('folded_json')
+
+    if not folded:
+        return jsonify(record.get('flamegraph_json', {}))
+
+    from parser import IDLE_FRAME_MARKERS
+    working = dict(folded)
+
+    if active_only == '1':
+        working = {
+            stack: count for stack, count in working.items()
+            if not any(marker in stack for marker in IDLE_FRAME_MARKERS)
+        }
+
+    if process_filter:
+        if mode == 'service':
+            working = {
+                stack: count
+                for stack, count in working.items()
+                if _classify_thread(stack.split(';')[0]) == process_filter
+            }
+        else:
+            working = {
+                stack: count
+                for stack, count in working.items()
+                if stack.split(';')[0] == process_filter
+            }
+
+    if not process_filter and not active_only and not working:
+        return jsonify(record.get('flamegraph_json', {}))
+
+    if working:
+        return jsonify(folded_to_flamegraph_json(working))
+    return jsonify({'name': 'root', 'value': 0, 'children': []})
+
+
+@app.route('/api/processes/<int:upload_id>')
+def api_processes(upload_id):
+    """Return process/service list for the filter dropdown.
+
+    ?mode=thread  -> individual thread names (default)
+    ?mode=service -> aggregated by Nutanix service
+    """
+    record = get_upload(upload_id)
+    if record is None:
+        abort(404)
+    folded = record.get('folded_json', {})
+    if not folded:
+        return jsonify([])
+
+    mode = request.args.get('mode', 'thread')
+
+    if mode == 'service':
+        from diagnostics import NUTANIX_SERVICES
+        services = {}
+        for stack, count in folded.items():
+            comm = stack.split(';')[0]
+            svc = _classify_thread(comm) or comm
+            services[svc] = services.get(svc, 0) + count
+        result = sorted(services.items(), key=lambda x: x[1], reverse=True)
+        return jsonify([{
+            'name': s,
+            'samples': c,
+            'description': NUTANIX_SERVICES.get(s, ''),
+        } for s, c in result])
+    else:
+        processes = {}
+        for stack, count in folded.items():
+            proc = stack.split(';')[0]
+            processes[proc] = processes.get(proc, 0) + count
+        result = sorted(processes.items(), key=lambda x: x[1], reverse=True)
+        return jsonify([{'name': p, 'samples': c} for p, c in result])
+
+
+@app.route('/api/analysis/<int:upload_id>')
+def api_analysis(upload_id):
+    record = get_upload(upload_id)
+    if record is None:
+        abort(404)
+    return jsonify(record.get('analysis_json', {}))
+
+
+@app.route('/delete/<int:upload_id>', methods=['POST'])
+def delete(upload_id):
+    record = get_upload(upload_id)
+    if record is None:
+        abort(404)
+
+    bundle_path = os.path.join(UPLOAD_DIR, record['filename'])
+    if os.path.exists(bundle_path):
+        os.remove(bundle_path)
+
+    delete_upload(upload_id)
+    flash('Upload deleted.', 'success')
+    return redirect(url_for('dashboard'))
+
+
+def _process_bundle(file, manual_cluster_id):
+    """
+    Process an uploaded tar.gz bundle or raw perf_threads.txt file.
+
+    Supports two modes:
+      1. tar.gz bundle from perf-collect.sh (contains metadata.json + perf_threads.txt)
+      2. Raw perf script text file (user provides cluster_id manually)
+    """
+    filename = file.filename
+    save_path = os.path.join(UPLOAD_DIR, filename)
+    file.save(save_path)
+
+    file_size = os.path.getsize(save_path)
+    log.info('Upload saved: %s (%d bytes)', save_path, file_size)
+
+    metadata = {}
+    perf_text = None
+    top_text = None
+
+    is_tar = False
+    try:
+        is_tar = tarfile.is_tarfile(save_path)
+    except Exception:
+        pass
+
+    if not is_tar and (filename.endswith('.tar.gz') or filename.endswith('.tgz')):
+        is_tar = True
+
+    log.info('Detected as tar: %s (filename: %s)', is_tar, filename)
+
+    if is_tar:
+        try:
+            perf_text, metadata, top_text = _extract_tar_bundle(save_path)
+            log.info('Extracted: perf_text=%d chars, metadata keys=%s',
+                     len(perf_text) if perf_text else 0,
+                     list(metadata.keys()) if metadata else [])
+        except Exception as e:
+            log.error('Tar extraction failed: %s', e, exc_info=True)
+            raise ValueError(f'Failed to extract tar bundle: {e}')
+    else:
+        with open(save_path, 'r', errors='replace') as f:
+            perf_text = f.read()
+        log.info('Read as raw text: %d chars', len(perf_text) if perf_text else 0)
+
+    if perf_text is None:
+        if is_tar:
+            try:
+                with tarfile.open(save_path, 'r:*') as tar:
+                    members = [m.name for m in tar.getmembers()]
+            except Exception:
+                members = ['(could not list)']
+            raise ValueError(
+                f'Could not find perf_threads.txt in the bundle. '
+                f'Archive contains: {", ".join(members)}'
+            )
+        else:
+            raise ValueError('Uploaded file could not be read')
+
+    if not perf_text.strip():
+        raise ValueError(
+            'perf_threads.txt is empty (0 bytes of perf data). '
+            'The perf recording may have captured no samples for the specified PID. '
+            'Try running without --pid to capture system-wide, or ensure the target '
+            'process is active during the capture window.'
+        )
+
+    if manual_cluster_id:
+        metadata['cluster_id'] = manual_cluster_id
+
+    if not metadata.get('cluster_id'):
+        metadata['cluster_id'] = 'unknown'
+
+    system_context = {}
+    if top_text:
+        system_context = parse_top_snapshot(top_text)
+        log.info('Parsed top snapshot: %s', list(system_context.keys()))
+    metadata['system_context'] = system_context
+
+    parsed = parse_and_process(perf_text)
+    diag = run_diagnostics(parsed, metadata)
+
+    upload_id = insert_upload(
+        cluster_id=metadata.get('cluster_id', 'unknown'),
+        hostname=metadata.get('hostname', 'unknown'),
+        collection_timestamp=metadata.get('collection_timestamp', ''),
+        filename=filename,
+        kernel_version=metadata.get('kernel_version', ''),
+        cpu_info=metadata.get('cpu_model', ''),
+        cpu_count=metadata.get('cpu_count', 0),
+        mem_total=metadata.get('mem_total', ''),
+        duration_seconds=metadata.get('duration_seconds', 0),
+        frequency_hz=metadata.get('frequency_hz', 0),
+        total_samples=parsed['total_samples'],
+        flamegraph_json=parsed['flamegraph_json'],
+        analysis_json={
+            'findings': diag['findings'],
+            'service_breakdown': diag['service_breakdown'],
+            'active_service_breakdown': diag['active_service_breakdown'],
+            'summary': diag['summary'],
+            'process_breakdown': parsed['process_breakdown'],
+            'active_process_breakdown': parsed['active_process_breakdown'],
+            'top_functions': parsed['top_functions'],
+            'kernel_user_split': parsed['kernel_user_split'],
+            'idle_samples': parsed['idle_samples'],
+            'active_samples': parsed['active_samples'],
+            'idle_pct': parsed['idle_pct'],
+            'active_pct': parsed['active_pct'],
+            'system_context': system_context,
+        },
+        metadata_json=metadata,
+        folded_json=parsed['folded'],
+    )
+
+    return {
+        'upload_id': upload_id,
+        'total_samples': parsed['total_samples'],
+        'hostname': metadata.get('hostname', 'unknown'),
+    }
+
+
+def _extract_tar_bundle(tar_path):
+    """Extract perf_threads.txt, metadata.json, and top_snapshot.txt from a tar.gz bundle."""
+    perf_text = None
+    metadata = {}
+    top_text = None
+
+    extract_dir = tempfile.mkdtemp(prefix='perf-extract-')
+    try:
+        with tarfile.open(tar_path, 'r:*') as tar:
+            members = tar.getmembers()
+            log.info('Tar members (%d): %s', len(members),
+                     [(m.name, m.size) for m in members])
+            tar.extractall(path=extract_dir)
+
+        for root, dirs, files in os.walk(extract_dir):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                if fname == 'perf_threads.txt':
+                    with open(fpath, 'r', errors='replace') as f:
+                        perf_text = f.read()
+                    log.info('Found perf_threads.txt: %d chars', len(perf_text))
+                elif fname == 'metadata.json':
+                    with open(fpath, 'r') as f:
+                        metadata = json.loads(f.read())
+                    log.info('Found metadata.json')
+                elif fname == 'top_snapshot.txt':
+                    with open(fpath, 'r', errors='replace') as f:
+                        top_text = f.read()
+                    log.info('Found top_snapshot.txt: %d chars', len(top_text))
+    finally:
+        import shutil
+        shutil.rmtree(extract_dir, ignore_errors=True)
+
+    return perf_text, metadata, top_text
+
+
+with app.app_context():
+    init_db()
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080, debug=True)

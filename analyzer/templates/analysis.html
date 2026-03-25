@@ -1,0 +1,539 @@
+{% extends "base.html" %}
+
+{% block title %}Analysis #{{ record.id }} - Perf Flame Analyzer{% endblock %}
+
+{% block head %}
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-flame-graph@4.1.3/dist/d3-flamegraph.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Analysis #{{ record.id }}</h1>
+        <p class="subtitle">
+            Cluster: <span class="cluster-tag">{{ record.cluster_id }}</span>
+            &nbsp; Host: <strong>{{ record.hostname or 'unknown' }}</strong>
+            &nbsp; Collected: {{ record.collection_timestamp or 'N/A' }}
+        </p>
+    </div>
+    <a href="{{ url_for('dashboard') }}" class="btn">Back to Dashboard</a>
+</div>
+
+{% set analysis = record.analysis_json %}
+{% set meta = record.metadata_json %}
+{% set ctx = analysis.get('system_context', {}) if analysis else {} %}
+
+<!-- Summary banner -->
+<div class="summary-banner">
+    <div class="summary-stat">
+        <span class="stat-value">{{ record.total_samples }}</span>
+        <span class="stat-label">Total Samples</span>
+    </div>
+    {% if analysis and analysis.active_samples is defined %}
+    <div class="summary-stat">
+        <span class="stat-value">{{ analysis.active_samples }}</span>
+        <span class="stat-label">Active ({{ analysis.active_pct | round(0) | int }}%)</span>
+    </div>
+    <div class="summary-stat">
+        <span class="stat-value">{{ analysis.idle_samples }}</span>
+        <span class="stat-label">Idle ({{ analysis.idle_pct | round(0) | int }}%)</span>
+    </div>
+    {% endif %}
+    <div class="summary-stat">
+        <span class="stat-value">{{ record.duration_seconds or '?' }}s</span>
+        <span class="stat-label">Duration</span>
+    </div>
+    <div class="summary-stat">
+        <span class="stat-value">{{ record.frequency_hz or '?' }} Hz</span>
+        <span class="stat-label">Frequency</span>
+    </div>
+    <div class="summary-stat">
+        <span class="stat-value">{{ record.kernel_version or '?' }}</span>
+        <span class="stat-label">Kernel</span>
+    </div>
+    {% if record.cpu_info %}
+    <div class="summary-stat">
+        <span class="stat-value">{{ record.cpu_count or '?' }} cores</span>
+        <span class="stat-label">{{ record.cpu_info }}</span>
+    </div>
+    {% endif %}
+</div>
+
+{% if analysis and analysis.summary %}
+<div class="analysis-summary">{{ analysis.summary }}</div>
+{% endif %}
+
+<!-- System Context -->
+{% if ctx and (ctx.load_avg_1 is defined or ctx.cpu_us is defined or ctx.mem_total_kb is defined) %}
+<div class="section-card system-context">
+    <h2>System Context <span class="section-subtitle">(from top snapshot at capture time)</span></h2>
+    <div class="context-grid">
+        {% if ctx.load_avg_1 is defined %}
+        <div class="context-card">
+            <div class="context-label">Load Average</div>
+            <div class="context-value {% if ctx.load_avg_1 > 2 * (ctx.load_avg_5 | default(ctx.load_avg_1)) %}context-alert{% endif %}">
+                {{ ctx.load_avg_1 }} / {{ ctx.load_avg_5 }} / {{ ctx.load_avg_15 }}
+            </div>
+            <div class="context-detail">1m / 5m / 15m</div>
+        </div>
+        {% endif %}
+
+        {% if ctx.cpu_us is defined %}
+        <div class="context-card">
+            <div class="context-label">CPU Split (from top)</div>
+            <div class="context-value">
+                {{ ctx.cpu_us }}% us, {{ ctx.cpu_sy }}% sy
+                {% if ctx.cpu_wa %}, {{ ctx.cpu_wa }}% wa{% endif %}
+                {% if ctx.cpu_st %}, {{ ctx.cpu_st }}% st{% endif %}
+            </div>
+            <div class="context-detail">
+                {% if ctx.cpu_id is defined %}{{ ctx.cpu_id }}% idle{% endif %}
+                {% if ctx.cpu_st and ctx.cpu_st > 3 %}
+                <span class="context-badge context-badge-warn">steal detected</span>
+                {% endif %}
+                {% if ctx.cpu_wa and ctx.cpu_wa > 10 %}
+                <span class="context-badge context-badge-warn">high iowait</span>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if ctx.mem_total_kb is defined %}
+        {% set mem_used_pct = ((1 - (ctx.mem_avail_kb | default(ctx.mem_free_kb, true) | default(0)) / ctx.mem_total_kb) * 100) | round(0) | int if ctx.mem_total_kb > 0 else 0 %}
+        <div class="context-card">
+            <div class="context-label">Memory</div>
+            <div class="context-value {% if mem_used_pct > 90 %}context-alert{% endif %}">
+                {{ mem_used_pct }}% used
+            </div>
+            <div class="context-detail">
+                {{ (ctx.mem_total_kb / 1024 / 1024) | round(1) }}GB total,
+                {{ ((ctx.mem_avail_kb | default(ctx.mem_free_kb, true) | default(0)) / 1024 / 1024) | round(1) }}GB available
+            </div>
+        </div>
+        {% endif %}
+
+        {% if ctx.tasks_total is defined %}
+        <div class="context-card">
+            <div class="context-label">Tasks</div>
+            <div class="context-value">{{ ctx.tasks_total }} total</div>
+            <div class="context-detail">{{ ctx.tasks_running }} running</div>
+        </div>
+        {% endif %}
+
+        {% if ctx.uptime %}
+        <div class="context-card">
+            <div class="context-label">Uptime</div>
+            <div class="context-value">{{ ctx.uptime }}</div>
+        </div>
+        {% endif %}
+    </div>
+
+    {% if ctx.top_processes %}
+    <details class="top-procs-details">
+        <summary>Top processes at capture time</summary>
+        <table class="data-table compact">
+            <thead>
+                <tr><th>PID</th><th>User</th><th>%CPU</th><th>%MEM</th><th>Command</th></tr>
+            </thead>
+            <tbody>
+                {% for p in ctx.top_processes %}
+                <tr>
+                    <td>{{ p.pid }}</td>
+                    <td>{{ p.user }}</td>
+                    <td>{{ p.cpu_pct }}</td>
+                    <td>{{ p.mem_pct }}</td>
+                    <td><code>{{ p.command }}</code></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </details>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- Flamegraph -->
+<div class="section-card">
+    <h2>Flamegraph</h2>
+    <div class="flamegraph-controls">
+        <div class="view-toggle" id="fg-active-toggle">
+            <button class="toggle-btn active" data-val="1">Active CPU</button>
+            <button class="toggle-btn" data-val="0">Total (incl. Idle)</button>
+        </div>
+        <div class="view-toggle" id="fg-mode-toggle">
+            <button class="toggle-btn active" data-mode="thread">By Thread</button>
+            <button class="toggle-btn" data-mode="service">By Service</button>
+        </div>
+        <select id="fg-process" class="fg-process-filter">
+            <option value="">All processes</option>
+        </select>
+        <input type="text" id="fg-search" placeholder="Search functions..." class="fg-search">
+        <button class="btn btn-sm" id="fg-reset">Reset Zoom</button>
+        <button class="btn btn-sm" id="fg-clear">Clear Search</button>
+    </div>
+    <div id="fg-filter-info" class="fg-filter-info" style="display:none;"></div>
+    <div id="flamegraph" class="flamegraph-container"></div>
+</div>
+
+<!-- Findings & Recommendations -->
+{% if analysis and analysis.findings %}
+<div class="section-card">
+    <h2>Diagnostic Findings</h2>
+    <div class="findings-list">
+        {% for finding in analysis.findings %}
+        <div class="finding finding-{{ finding.severity }}">
+            <div class="finding-header">
+                <span class="severity-badge severity-{{ finding.severity }}">{{ finding.severity | upper }}</span>
+                <span class="finding-title">{{ finding.title }}</span>
+                <span class="finding-category">{{ finding.category }}</span>
+            </div>
+            <p class="finding-detail">{{ finding.detail }}</p>
+            {% if finding.recommendation %}
+            <div class="finding-recommendation">
+                <strong>Recommendation:</strong> {{ finding.recommendation }}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<!-- CPU breakdown -->
+<div class="two-col">
+    <div class="section-card">
+        <div class="section-header-row">
+            <h2>CPU Breakdown</h2>
+            <div class="toggle-group">
+                <div class="view-toggle" id="breakdown-active-toggle">
+                    <button class="toggle-btn active" data-val="active">Active CPU</button>
+                    <button class="toggle-btn" data-val="total">Total</button>
+                </div>
+                <div class="view-toggle" id="breakdown-mode-toggle">
+                    <button class="toggle-btn active" data-mode="thread">By Thread</button>
+                    <button class="toggle-btn" data-mode="service">By Service</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Total / Thread view -->
+        {% if analysis and analysis.process_breakdown %}
+        <div class="bar-chart" id="breakdown-total-thread">
+            {% for proc in analysis.process_breakdown[:20] %}
+            <div class="bar-row">
+                <span class="bar-label" title="PID {{ proc.pid }}">{{ proc.name }}</span>
+                <div class="bar-track">
+                    <div class="bar-fill" style="width: {{ proc.pct }}%"></div>
+                </div>
+                <span class="bar-value">{{ proc.pct }}%</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- Active / Thread view (default) -->
+        {% if analysis and analysis.active_process_breakdown %}
+        <div class="bar-chart" id="breakdown-active-thread">
+            {% for proc in analysis.active_process_breakdown[:20] %}
+            <div class="bar-row">
+                <span class="bar-label" title="PID {{ proc.pid }}">{{ proc.name }}</span>
+                <div class="bar-track">
+                    <div class="bar-fill" style="width: {{ proc.pct }}%"></div>
+                </div>
+                <span class="bar-value">{{ proc.pct }}%</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- Total / Service view -->
+        {% if analysis and analysis.service_breakdown %}
+        <div id="breakdown-total-service" style="display:none;">
+            <div class="bar-chart">
+                {% for svc in analysis.service_breakdown %}
+                {% if svc.pct > 0.1 %}
+                <div class="bar-row">
+                    <span class="bar-label" title="{{ svc.description }}">{{ svc.name }}</span>
+                    <div class="bar-track">
+                        <div class="bar-fill {% if svc.description %}bar-fill-nutanix{% endif %}" style="width: {{ svc.pct }}%"></div>
+                    </div>
+                    <span class="bar-value">{{ svc.pct }}%</span>
+                </div>
+                {% endif %}
+                {% endfor %}
+            </div>
+            <table class="data-table compact" style="margin-top: 1rem;">
+                <thead>
+                    <tr><th>Service</th><th>Threads</th><th>Samples</th><th>%</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    {% for svc in analysis.service_breakdown %}
+                    {% if svc.pct > 0.1 %}
+                    <tr>
+                        <td><strong>{{ svc.name }}</strong></td>
+                        <td><span class="thread-list">{{ svc.process }}</span></td>
+                        <td>{{ svc.samples }}</td>
+                        <td>{{ svc.pct }}%</td>
+                        <td>{{ svc.description }}</td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+
+        <!-- Active / Service view -->
+        {% if analysis and analysis.active_service_breakdown %}
+        <div id="breakdown-active-service" style="display:none;">
+            <div class="bar-chart">
+                {% for svc in analysis.active_service_breakdown %}
+                {% if svc.pct > 0.1 %}
+                <div class="bar-row">
+                    <span class="bar-label" title="{{ svc.description }}">{{ svc.name }}</span>
+                    <div class="bar-track">
+                        <div class="bar-fill {% if svc.description %}bar-fill-nutanix{% endif %}" style="width: {{ svc.pct }}%"></div>
+                    </div>
+                    <span class="bar-value">{{ svc.pct }}%</span>
+                </div>
+                {% endif %}
+                {% endfor %}
+            </div>
+            <table class="data-table compact" style="margin-top: 1rem;">
+                <thead>
+                    <tr><th>Service</th><th>Threads</th><th>Samples</th><th>% Active</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    {% for svc in analysis.active_service_breakdown %}
+                    {% if svc.pct > 0.1 %}
+                    <tr>
+                        <td><strong>{{ svc.name }}</strong></td>
+                        <td><span class="thread-list">{{ svc.process }}</span></td>
+                        <td>{{ svc.samples }}</td>
+                        <td>{{ svc.pct }}%</td>
+                        <td>{{ svc.description }}</td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Top functions -->
+    {% if analysis and analysis.top_functions %}
+    <div class="section-card">
+        <h2>Top Functions (leaf)</h2>
+        <table class="data-table compact">
+            <thead>
+                <tr><th>#</th><th>Function</th><th>Samples</th><th>%</th></tr>
+            </thead>
+            <tbody>
+                {% for func in analysis.top_functions %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td><code>{{ func.function }}</code></td>
+                    <td>{{ func.samples }}</td>
+                    <td>{{ func.pct }}%</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Kernel/User split -->
+{% if analysis and analysis.kernel_user_split %}
+<div class="section-card">
+    <h2>Kernel / Userspace Split</h2>
+    <div class="ku-split">
+        <div class="ku-bar">
+            <div class="ku-kernel" style="width: {{ analysis.kernel_user_split.kernel_pct }}%">
+                Kernel {{ analysis.kernel_user_split.kernel_pct }}%
+            </div>
+            <div class="ku-user" style="width: {{ analysis.kernel_user_split.user_pct }}%">
+                User {{ analysis.kernel_user_split.user_pct }}%
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Raw metadata -->
+{% if meta %}
+<details class="section-card">
+    <summary><h2 style="display:inline">Raw Metadata</h2></summary>
+    <pre class="metadata-json">{{ meta | tojson(indent=2) }}</pre>
+</details>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var fgBaseUrl = '{{ url_for("api_flamegraph", upload_id=record.id) }}';
+    var processesUrl = '{{ url_for("api_processes", upload_id=record.id) }}';
+    var processSelect = document.getElementById('fg-process');
+    var filterInfo = document.getElementById('fg-filter-info');
+    var chart = null;
+    var currentFgMode = 'thread';
+    var currentActiveOnly = '1';
+
+    function createChart() {
+        return flamegraph()
+            .width(document.getElementById('flamegraph').offsetWidth)
+            .cellHeight(18)
+            .transitionDuration(300)
+            .tooltip(true)
+            .title('')
+            .selfValue(false);
+    }
+
+    function loadFlamegraph(processFilter) {
+        var url = fgBaseUrl;
+        var params = [];
+        if (processFilter) params.push('process=' + encodeURIComponent(processFilter));
+        if (currentFgMode === 'service') params.push('mode=service');
+        if (currentActiveOnly === '1') params.push('active_only=1');
+        if (params.length) url += '?' + params.join('&');
+
+        document.getElementById('flamegraph').innerHTML = '<p class="empty-state">Loading...</p>';
+
+        d3.json(url)
+            .then(function(data) {
+                document.getElementById('flamegraph').innerHTML = '';
+
+                if (!data || !data.children || data.children.length === 0) {
+                    document.getElementById('flamegraph').innerHTML =
+                        '<p class="empty-state">No flamegraph data for this selection.</p>';
+                    filterInfo.style.display = 'none';
+                    return;
+                }
+
+                chart = createChart();
+                d3.select('#flamegraph').datum(data).call(chart);
+
+                var infoParts = [];
+                if (currentActiveOnly === '1') infoParts.push('active CPU only');
+                if (processFilter) infoParts.push(processFilter);
+                infoParts.push(data.value + ' samples');
+                infoParts.push(currentFgMode + ' mode');
+
+                filterInfo.textContent = 'Showing: ' + infoParts.join(' | ');
+                filterInfo.style.display = 'block';
+            })
+            .catch(function(err) {
+                console.error('Failed to load flamegraph:', err);
+                document.getElementById('flamegraph').innerHTML =
+                    '<p class="empty-state">Failed to load flamegraph data.</p>';
+            });
+    }
+
+    function loadProcessList(mode) {
+        var url = processesUrl + '?mode=' + mode;
+        d3.json(url).then(function(processes) {
+            processSelect.innerHTML = '<option value="">All processes</option>';
+            processes.forEach(function(p) {
+                var opt = document.createElement('option');
+                opt.value = p.name;
+                var label = p.name + ' (' + p.samples + ' samples)';
+                if (p.description) label += ' - ' + p.description;
+                opt.textContent = label;
+                processSelect.appendChild(opt);
+            });
+        });
+    }
+
+    // Active/Total toggle for flamegraph
+    document.querySelectorAll('#fg-active-toggle .toggle-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('#fg-active-toggle .toggle-btn').forEach(function(b) {
+                b.classList.remove('active');
+            });
+            this.classList.add('active');
+            currentActiveOnly = this.dataset.val;
+            loadFlamegraph(processSelect.value);
+        });
+    });
+
+    // Thread/Service toggle for flamegraph
+    document.querySelectorAll('#fg-mode-toggle .toggle-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('#fg-mode-toggle .toggle-btn').forEach(function(b) {
+                b.classList.remove('active');
+            });
+            this.classList.add('active');
+            currentFgMode = this.dataset.mode;
+            processSelect.value = '';
+            loadProcessList(currentFgMode);
+            loadFlamegraph('');
+        });
+    });
+
+    // CPU Breakdown toggles
+    var breakdownActiveMode = 'active';
+    var breakdownViewMode = 'thread';
+
+    function updateBreakdownVisibility() {
+        var panels = ['total-thread', 'total-service', 'active-thread', 'active-service'];
+        var targetId = 'breakdown-' + breakdownActiveMode + '-' + breakdownViewMode;
+        panels.forEach(function(id) {
+            var el = document.getElementById('breakdown-' + id);
+            if (el) el.style.display = id === (breakdownActiveMode + '-' + breakdownViewMode) ? '' : 'none';
+        });
+    }
+
+    document.querySelectorAll('#breakdown-active-toggle .toggle-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('#breakdown-active-toggle .toggle-btn').forEach(function(b) {
+                b.classList.remove('active');
+            });
+            this.classList.add('active');
+            breakdownActiveMode = this.dataset.val;
+            updateBreakdownVisibility();
+        });
+    });
+
+    document.querySelectorAll('#breakdown-mode-toggle .toggle-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('#breakdown-mode-toggle .toggle-btn').forEach(function(b) {
+                b.classList.remove('active');
+            });
+            this.classList.add('active');
+            breakdownViewMode = this.dataset.mode;
+            updateBreakdownVisibility();
+        });
+    });
+
+    processSelect.addEventListener('change', function() {
+        loadFlamegraph(this.value);
+    });
+
+    document.getElementById('fg-search').addEventListener('input', function() {
+        if (chart) chart.search(this.value);
+    });
+
+    document.getElementById('fg-reset').addEventListener('click', function() {
+        if (chart) chart.resetZoom();
+    });
+
+    document.getElementById('fg-clear').addEventListener('click', function() {
+        document.getElementById('fg-search').value = '';
+        if (chart) chart.clear();
+    });
+
+    window.addEventListener('resize', function() {
+        if (chart) chart.width(document.getElementById('flamegraph').offsetWidth);
+    });
+
+    // Initial state: active thread view
+    updateBreakdownVisibility();
+    loadProcessList('thread');
+    loadFlamegraph('');
+})();
+</script>
+{% endblock %}
