@@ -11,7 +11,7 @@ set -euo pipefail
 #   - /perfanal filesystem exists on the target
 #
 
-TARGET="${1:-root@10.69.13.33}"
+TARGET="${1:-root@10.69.2.186}"
 REMOTE_BASE="/perfanal/perf-analyzer"
 REMOTE_COLLECTOR="/perfanal/cvm-collector"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -128,7 +128,7 @@ echo ""
 echo "============================================"
 echo " Deployment complete!"
 echo ""
-echo " Web UI:  http://10.69.13.33:8080"
+echo " Web UI:  http://10.69.2.186:8080"
 echo ""
 echo " Collector script on analyzer VM:"
 echo "   ${TARGET}:${REMOTE_COLLECTOR}/perf-collect.sh"
