@@ -23,7 +23,7 @@ import traceback
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    flash, jsonify, abort,
+    flash, jsonify, abort, send_file,
 )
 
 ADMIN_TOKEN_HASH = os.environ.get(
@@ -282,6 +282,22 @@ def api_iostat(upload_id):
     if not iostat:
         return jsonify(None)
     return jsonify(iostat)
+
+
+COLLECTOR_SEARCH_PATHS = [
+    os.path.join(os.path.dirname(__file__), 'perf-collect.sh'),
+    os.path.join(os.path.dirname(__file__), '..', 'cvm-collector', 'perf-collect.sh'),
+    '/perfanal/cvm-collector/perf-collect.sh',
+]
+
+
+@app.route('/download/collector')
+def download_collector():
+    for candidate in COLLECTOR_SEARCH_PATHS:
+        path = os.path.abspath(candidate)
+        if os.path.isfile(path):
+            return send_file(path, as_attachment=True, download_name='perf-collect.sh')
+    abort(404)
 
 
 @app.route('/api/admin-auth', methods=['POST'])

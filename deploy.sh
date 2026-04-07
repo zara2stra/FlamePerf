@@ -55,6 +55,7 @@ scp -q "${SCRIPT_DIR}/analyzer/templates/dashboard.html"   "${TARGET}:${REMOTE_B
 scp -q "${SCRIPT_DIR}/analyzer/templates/upload.html"      "${TARGET}:${REMOTE_BASE}/templates/"
 scp -q "${SCRIPT_DIR}/analyzer/templates/analysis.html"    "${TARGET}:${REMOTE_BASE}/templates/"
 scp -q "${SCRIPT_DIR}/cvm-collector/perf-collect.sh"       "${TARGET}:${REMOTE_COLLECTOR}/"
+scp -q "${SCRIPT_DIR}/cvm-collector/perf-collect.sh"       "${TARGET}:${REMOTE_BASE}/perf-collect.sh"
 
 echo "  Files deployed:"
 run_remote "find ${REMOTE_BASE} ${REMOTE_COLLECTOR} -type f | sort"
