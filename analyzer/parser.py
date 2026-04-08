@@ -400,9 +400,9 @@ def parse_top_snapshot(text):
             if m_used:
                 result['mem_used_kb'] = int(float(m_used.group(1)) * mult)
 
-        # Avail mem: "... 3327040 avail Mem"
+        # Avail mem: "... 3327040 avail Mem" (may appear on Mem or Swap line)
         if 'avail Mem' in line or 'avail mem' in line.lower():
-            mult = 1 if 'KiB' in line or 'avail Mem' in line else 1024
+            mult = 1024 if 'MiB' in line else 1
             m = re.search(r'([\d.]+)\s+avail', line, re.IGNORECASE)
             if m:
                 result['mem_avail_kb'] = int(float(m.group(1)) * mult)
