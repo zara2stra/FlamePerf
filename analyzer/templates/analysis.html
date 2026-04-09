@@ -805,7 +805,15 @@
     });
 
     document.getElementById('fg-reset').addEventListener('click', function() {
-        if (chart) chart.resetZoom();
+        pidInput.value = '';
+        currentPid = '';
+        pidClearBtn.style.display = 'none';
+        processSelect.disabled = false;
+        processSelect.value = '';
+        highlightPidRow('');
+        document.getElementById('fg-search').value = '';
+        if (chart) chart.clear();
+        loadFlamegraph('');
     });
 
     document.getElementById('fg-clear').addEventListener('click', function() {
