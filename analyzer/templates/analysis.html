@@ -1129,6 +1129,10 @@ function legendClickHandler(e, legendItem, legend) {
         var colWrap = document.getElementById('iostat-col-toggles');
         var devWrap = document.getElementById('iostat-dev-toggles');
 
+        var colButtons = [];
+        var colClickTimer = null;
+        var colLastClick = { col: null, time: 0 };
+
         ioData.columns.forEach(function(col) {
             activeCols[col] = DEFAULT_COLUMNS.indexOf(col) >= 0;
             var btn = document.createElement('button');
@@ -1136,14 +1140,43 @@ function legendClickHandler(e, legendItem, legend) {
             btn.textContent = col;
             btn.dataset.col = col;
             btn.addEventListener('click', function() {
-                activeCols[col] = !activeCols[col];
-                this.classList.toggle('active', activeCols[col]);
-                renderChart();
+                var now = Date.now();
+                var isDbl = (col === colLastClick.col && now - colLastClick.time < 400);
+                colLastClick.col = col;
+                colLastClick.time = now;
+
+                if (colClickTimer) { clearTimeout(colClickTimer); colClickTimer = null; }
+
+                if (isDbl) {
+                    var visibleCount = 0;
+                    ioData.columns.forEach(function(c) { if (activeCols[c]) visibleCount++; });
+                    var isSolo = (visibleCount === 1 && activeCols[col]);
+                    ioData.columns.forEach(function(c) { activeCols[c] = isSolo ? true : (c === col); });
+                    syncColButtons();
+                    renderChart();
+                } else {
+                    colClickTimer = setTimeout(function() {
+                        colClickTimer = null;
+                        activeCols[col] = !activeCols[col];
+                        btn.classList.toggle('active', activeCols[col]);
+                        renderChart();
+                    }, 300);
+                }
             });
             colWrap.appendChild(btn);
+            colButtons.push(btn);
         });
 
+        function syncColButtons() {
+            colButtons.forEach(function(b) {
+                b.classList.toggle('active', !!activeCols[b.dataset.col]);
+            });
+        }
+
         var devButtons = [];
+        var devClickTimer = null;
+        var devLastClick = { dev: null, time: 0 };
+
         ioData.devices.forEach(function(dev) {
             if (SKIP_DEV_RE.test(dev)) return;
             activeDevs[dev] = true;
@@ -1152,20 +1185,28 @@ function legendClickHandler(e, legendItem, legend) {
             btn.textContent = dev;
             btn.dataset.dev = dev;
             btn.addEventListener('click', function() {
-                activeDevs[dev] = !activeDevs[dev];
-                this.classList.toggle('active', activeDevs[dev]);
-                renderChart();
-            });
-            btn.addEventListener('dblclick', function() {
-                var anyActive = Object.keys(activeDevs).some(function(d) { return activeDevs[d]; });
-                if (anyActive) {
-                    Object.keys(activeDevs).forEach(function(d) { activeDevs[d] = false; });
-                    activeDevs[dev] = true;
+                var now = Date.now();
+                var isDbl = (dev === devLastClick.dev && now - devLastClick.time < 400);
+                devLastClick.dev = dev;
+                devLastClick.time = now;
+
+                if (devClickTimer) { clearTimeout(devClickTimer); devClickTimer = null; }
+
+                if (isDbl) {
+                    var visibleCount = 0;
+                    Object.keys(activeDevs).forEach(function(d) { if (activeDevs[d]) visibleCount++; });
+                    var isSolo = (visibleCount === 1 && activeDevs[dev]);
+                    Object.keys(activeDevs).forEach(function(d) { activeDevs[d] = isSolo ? true : (d === dev); });
+                    syncDevButtons();
+                    renderChart();
                 } else {
-                    Object.keys(activeDevs).forEach(function(d) { activeDevs[d] = true; });
+                    devClickTimer = setTimeout(function() {
+                        devClickTimer = null;
+                        activeDevs[dev] = !activeDevs[dev];
+                        btn.classList.toggle('active', activeDevs[dev]);
+                        renderChart();
+                    }, 300);
                 }
-                syncDevButtons();
-                renderChart();
             });
             devWrap.appendChild(btn);
             devButtons.push(btn);
